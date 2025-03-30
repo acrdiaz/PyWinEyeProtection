@@ -19,6 +19,14 @@ A Python application for protecting your eyes while working on Windows computers
   - Smooth transitions between time periods
   - Graceful shutdown with automatic reset
 
+## Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/PyWinEyeProtection.git
+cd PyWinEyeProtection
+```
+
 ## Requirements
 
 ```bash

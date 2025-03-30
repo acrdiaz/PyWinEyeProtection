@@ -53,13 +53,12 @@ class Display:
         cls._gammas[0] = gamma_red
         cls._gammas[1] = gamma_green
         cls._gammas[2] = gamma_blue
-        return cls._update_ramps()
+        return True
 
     @classmethod
     def set_brightness(cls, brightness: int) -> bool:
-        brightness = max(0, min(100, brightness))
-        cls._brightness = brightness
-        return cls._update_ramps()
+        cls._brightness = max(0, min(100, brightness))
+        return True
 
     @classmethod
     def _update_ramps(cls) -> bool:
@@ -70,37 +69,16 @@ class Display:
 
         for j in range(3):
             for i in range(256):
-                # gamma calculation
                 array_val = (math.pow(i / 256.0, 1.0 / cls._gammas[j]) * 65535) + 0.5
                 array_val *= brightness
-
                 array_val = max(0, min(65535, array_val))
                 ramp_array[j * 256 + i] = int(array_val)
 
         return bool(windll.gdi32.SetDeviceGammaRamp(cls._hdc, ramp_array))
 
     @classmethod
-    def get_monitor_handles(cls):
-        monitors = []
-        def enum_callback(hMonitor, hdcMonitor, lprect, dwData):
-            monitors.append(hMonitor)
-            return True
-        
-        enum_callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong, ctypes.c_ulong, ctypes.POINTER(ctypes.c_long), ctypes.c_ulong)
-        callback = enum_callback_type(enum_callback)
-        windll.user32.EnumDisplayMonitors(None, None, callback, 0)
-        return monitors
-
-    @classmethod
-    def set_time_profile(cls, period: str, start: datetime_time, end: datetime_time, 
-                        gamma: tuple, brightness: int):
-        if period in cls._time_settings:
-            cls._time_settings[period].update({
-                'start': start,
-                'end': end,
-                'gamma': gamma,
-                'brightness': brightness
-            })
+    def apply_changes(cls) -> bool:
+        return cls._update_ramps()
 
     @classmethod
     def auto_adjust(cls):
@@ -114,11 +92,13 @@ class Display:
                 if current_time >= start or current_time <= end:
                     cls.set_gamma(*settings['gamma'])
                     cls.set_brightness(settings['brightness'])
+                    cls.apply_changes()  # Apply both gamma and brightness at once
                     break
             else:
                 if start <= current_time <= end:
                     cls.set_gamma(*settings['gamma'])
                     cls.set_brightness(settings['brightness'])
+                    cls.apply_changes()  # Apply both gamma and brightness at once
                     break
 
     @classmethod
@@ -145,20 +125,59 @@ class Display:
         cls._running = False
 
     @classmethod
+    def set_time_profile(cls, period: str, start: datetime_time, end: datetime_time, 
+                        gamma: tuple, brightness: int):
+        if period in cls._time_settings:
+            cls._time_settings[period].update({
+                'start': start,
+                'end': end,
+                'gamma': gamma,
+                'brightness': brightness
+            })
+            
+    @classmethod
     def adjust_to_ambient_light(cls):
         try:
             import wmi
             c = wmi.WMI(namespace='root\\WMI')
-            als = c.MSAcpi_ALSensorInformation()[0]
-            brightness_level = als.CurrentBrightness
-            
-            # Adjust brightness based on ambient light
-            cls.set_brightness(min(100, brightness_level + 20))
-        except:
+            # First try to get the ALS information
+            try:
+                als = c.MSAcpi_ALSensorInformation()[0]
+                brightness_level = als.CurrentBrightness
+                # Adjust brightness based on ambient light with bounds checking
+                adjusted_brightness = min(100, max(0, brightness_level + 20))
+                cls.set_brightness(adjusted_brightness)
+                cls.apply_changes()
+                return True
+            except (AttributeError, IndexError):
+                # If ALS is not available, try alternative WMI classes for brightness info
+                try:
+                    monitor = c.WmiMonitorBrightness()[0]
+                    current_brightness = monitor.CurrentBrightness
+                    cls.set_brightness(current_brightness)
+                    cls.apply_changes()
+                    return True
+                except (AttributeError, IndexError):
+                    # If no brightness sensors are available, use time-based defaults
+                    current_time = datetime.now().time()
+                    # Use existing time settings for brightness
+                    for period, settings in cls._time_settings.items():
+                        if cls._is_current_time_in_period(current_time, settings['start'], settings['end']):
+                            cls.set_brightness(settings['brightness'])
+                            cls.apply_changes()
+                            return True
+                    return False
+        except Exception as e:
+            print(f"Warning: Could not adjust brightness: {str(e)}")
             return False
-        return True
 
-# Modify main to handle graceful shutdown
+    @classmethod
+    def _is_current_time_in_period(cls, current_time, start_time, end_time):
+        if end_time < start_time:  # Handle overnight periods
+            return current_time >= start_time or current_time <= end_time
+        return start_time <= current_time <= end_time
+
+# Main execution block
 if __name__ == "__main__":
     display = Display()
     
@@ -194,10 +213,12 @@ if __name__ == "__main__":
     try:
         print("Eye protection running. Press Ctrl+C to exit...")
         while True:
-            time_module.sleep(1)  # Fix this line
+            time_module.sleep(60)  # Check every minute instead of every second
             display.auto_adjust()  # Continuously adjust based on time
+            display.adjust_to_ambient_light()  # Also check ambient light periodically
     except KeyboardInterrupt:
         print("\nShutting down eye protection...")
         display.stop()
-        display.set_gamma(1.0, 1.0, 1.0)  # Reset to normal
-        display.set_brightness(100)       # Reset to full brightness
+        display.set_gamma(1.0, 1.0, 1.0)
+        display.set_brightness(100)
+        display.apply_changes()  # Apply final changes
